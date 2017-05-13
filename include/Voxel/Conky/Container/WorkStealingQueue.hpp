@@ -71,9 +71,9 @@ class WorkStealingQueue {
     auto bottom     = wrappedIndex(Bottom.load(std::memory_order_relaxed));
     Objects[bottom] = std::move(object);
 
-    // Ensure that the compiler does not reorder this insturction and the one
-    // above, since then other threads may see that the pushed object is on the
-    // queue, but it actually isn't.
+    // Ensure that the compiler does not reorder this instruction and the
+    // setting of the object above, otherwise the object seems added (since the
+    // bottom index has moved) but isn't (since it would not have been added).
     Bottom.store(bottom + 1, std::memory_order_release);
   }
 
@@ -86,9 +86,9 @@ class WorkStealingQueue {
     auto bottom     = wrappedIndex(Bottom.load(std::memory_order_relaxed));
     Objects[bottom] = object;
 
-    // Ensure that the compiler does not reorder this instruction with the one
-    // above, since then other threads may see that the pushed object is on the
-    // queue, but it actually isn't.
+    // Ensure that the compiler does not reorder this instruction and the
+    // setting of the object above, otherwise the object seems added (since the
+    // bottom index has moved) but isn't (since it would not have been added)
     Bottom.store(bottom + 1, std::memory_order_release); 
   }
   
@@ -127,25 +127,27 @@ class WorkStealingQueue {
 
     // This acts as a barrier to ensure that top is always set __after__ bottom,
     // and that neither the compiler nor the cpu reorder the instructions.
+    
+    // All non-relaxed atomic operations cause ordering within their own thread,
+    // so this acquire operation is a barrier between it and the store above.
     auto top = Top.load(std::memory_order_acquire);
-    if (top <= bottom) {
-      auto object = make_optional(Objects[wrappedIndex(bottom)]);
-      if (top != bottom)
-        return object;
-
-      // One element in the queue, if this exchange is true then we popped the
-      // element before another thread stole it, and then we return the object,
-      // otherwise we lost the race and the queue is empty.
-      bool exchange = Top.compare_exchange_strong(top + 1                  ,
-                                                  top                      ,
-                                                  std::memory_order_acquire,
-                                                  std::memory_order_relaxed);
-      return exchange ? object : OptionalType{};
+    if (top > bottom) {
+      Bottom.store(top, std::memory_order_relaxed);
+      return OptionalType{};
     }
 
-    // This is the case for an already empty queue.
-    Bottom.store(top, std::memory_order_relaxed);
-    return OptionalType{};
+    auto object = make_optional(Objects[wrappedIndex(bottom)]);
+    if (top != bottom)
+      return object;
+
+    // If we are here there is only one element left in the queue, and there may
+    // be a race between this method and steal() to get it. If this exchange is
+    // true then this method won the race (or was not in one) and then the
+    // object can be returned, otherwise the queue has already been emptied.
+    bool exchange = Top.compare_exchange_strong(top + 1                  ,
+                                                top                      ,
+                                                std::memory_order_release);
+    return exchange ? object : OptionalType{};
   }
 
   /// Steals an object from the top of the queue. This returns an optional
@@ -180,24 +182,24 @@ class WorkStealingQueue {
   OptionalType steal() {
     auto top = Top.load(std::memory_order_relaxed);
 
-    // We must load top __before__ bottom, and acquiring on this load means all
-    // writes from other threads before the release (i.e the store to bottom
-    // in push) are side effects in other threads (i,e the one running here).
-    // Essentially, we have a memory barrier beween pop and steal.
+    // The top variable must be loaded __before__ bottom, incase pop()'s from
+    // the queue's thread have modified the queue.
     auto bottom = Bottom.load(std::memory_order_acquire);
-    if (top < bottom) {
-      // Here we get the object at top, and try to update Top. __If__ we do
-      // update Top then no other thread beat us to the update, and we use
-      // acquire ordering to ensure that object is valid, otherwise we don't
-      // care abut if object is valid, since we won't return it.
-      auto object    = make_optional(Objects[wrappedIndex(top)]);
-      bool exchanged = Top.compare_exchange_strong(top                      ,
-                                                   top + 1                  ,
-                                                   std::memory_order_acquire,
-                                                   std::memory_order_relaxed);
-      return exchanged ? object : OptionalType{};
-    }
-    return OptionalType{};
+    if (top >= bottom)
+      return OptionalType{};
+
+    // Here the object at top is fetched, and and update to Top is atempted,
+    // since the top element is being stolen. __If__ the exchange succeeds,
+    // then this method won a race with another thread to steal the element,
+    // or if there is only a single element left, then it won a race between
+    // other threads and the pop() method (potentially), or there was no race.
+    // In summary, if the exchange succeeds, the object can be returned,
+    // otherwise it can't.
+    auto object    = make_optional(Objects[wrappedIndex(top)]);
+    bool exchanged = Top.compare_exchange_strong(top                      ,
+                                                 top + 1                  ,
+                                                 std::memory_order_release);
+    return exchanged ? object : OptionalType{};
   }
 
   /// Returns the number of elements in the queue. This __does not__ always
