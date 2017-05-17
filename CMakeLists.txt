@@ -22,7 +22,7 @@ endif()
 
 #==--- Options --------------------------------------------------------------==#
 
-set(CMAKE_CXX_COMPILER clang++)
+set(CMAKE_CXX_COMPILER /usr/bin/clang++)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${Conky_SOURCE_DIR}/cmake)
 
 #==--- Packages -------------------------------------------------------------==#

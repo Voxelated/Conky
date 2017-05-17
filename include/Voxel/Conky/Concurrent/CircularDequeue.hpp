@@ -1,4 +1,4 @@
-//==--- Conky/Container/WorkStealingQueue.hpp -------------- -*- C++ -*- ---==//
+//==--- Conky/Concurrent/CircularDequeue.hpp --------------- -*- C++ -*- ---==//
 //            
 //                                Voxel : Conky
 //
@@ -8,8 +8,10 @@
 //
 //==------------------------------------------------------------------------==//
 //
-/// \file  WorkStealingQueue.hpp
-/// \brief This file provides the definition of a lock-free work stealing queue.
+/// \file  CircularDequeue.hpp
+/// \brief This file provides the definition of a lock-free circular dequeue.
+///        Only a single thread can push and pop from the bottom of the dequeue,
+///        while any number of elements can steal from the top of the dequeue.
 //
 //==------------------------------------------------------------------------==//
 
@@ -18,26 +20,51 @@
 #include <Voxel/Math/Math.hpp>
 #include <array>
 #include <atomic>
-#include <optional>
+#include <experimental/optional>
+#include <iostream>
 
-namespace Voxx {
+// Wrapper to support c++14.
+namespace std {
+  /// Defines an alias for std::optional.
+  /// \tparam T The type of the optional element.
+  template <typename T>
+  using optional = experimental::optional<T>;
+} // namespace std
+
+namespace Voxx  {
 namespace Conky {
 
-/// The WorkStealingQueue is a concurrent lock-free work stealing queue which
-/// can hold a fixed size number of tasks per thread.
+/// The CircularDequeue is a concurrent lock-free dequeue which allows a single
+/// thread to push and pop onto the bottom of the dequeue, and any number of
+/// threads to steal from the top of the dequeue.
 /// 
-/// This imlementation is base on the original paper by Chase and Lev:
+/// Popping or stealing from an empty dequeue returns a ``std::optional<T>``
+/// which is in an invalid state, and can be tested in an if statement as it
+/// is convertible to bool. The optional stores an extra bool, but currently the
+/// overhead is acceptable as the optional types are likely not stored. If the
+/// optional is valid, the valid type can be moved into a container.
+/// 
+/// Pushing to a full queue is __undefined behaviour__ as it will overwrite the
+/// oldest element in the dequeue (the current top). Having push return an error
+/// will add overhead, and a DynamicDequeue may be added to handle such
+/// functionality.
+/// 
+/// This implementation of a dequeue holds a fixes size number of objects.
+/// 
+/// This imlementation is based on the original paper by Chase and Lev:
 /// 
 ///   [Dynamic circular work-stealing deque](
 ///     http://dl.acm.org/citation.cfm?id=1073974)
 ///     
+/// without the dynamic resizing.
+/// 
 /// __Note:__ When using this class for per thread queues, ensure that the
 ///           instances are aligned so that there is no false sharing.
 /// 
 /// \tparam Object      The type of the data in the queue.
 /// \tparam MaxObjects  The maximum number of objects for the queue.
 template <typename Object, uint32_t MaxObjects>
-class WorkStealingQueue {
+class CircularDequeue {
  public:
   ///==--- Aliases ---------------------------------------------------------==//
   
@@ -55,11 +82,6 @@ class WorkStealingQueue {
   /// Defines the type of container used to store the queue's objects.
   using ContainerType = std::array<ObjectType, MaxObjects>;
 
-  //==--- Con/destruction --------------------------------------------------==//
-  
-  /// Constructor -- ensures that the queue is a power of 2 size, as we need the
-  /// performance optimi
-  
   //==--- Methods ----------------------------------------------------------==//
   
   /// Pushes an object onto the front of the queue, when the object is an
@@ -68,8 +90,8 @@ class WorkStealingQueue {
   /// full. 
   /// \param[in] object   The object to push onto the queue.
   void push(ObjectType&& object) {
-    auto bottom     = wrappedIndex(Bottom.load(std::memory_order_relaxed));
-    Objects[bottom] = std::move(object);
+    auto bottom                   = Bottom.load(std::memory_order_relaxed);
+    Objects[wrappedIndex(bottom)] = std::move(object);
 
     // Ensure that the compiler does not reorder this instruction and the
     // setting of the object above, otherwise the object seems added (since the
@@ -83,8 +105,8 @@ class WorkStealingQueue {
   /// if the queue is full. 
   /// \param[in]  object  The object to push onto the queue.
   void push(const ObjectType& object) {
-    auto bottom     = wrappedIndex(Bottom.load(std::memory_order_relaxed));
-    Objects[bottom] = object;
+    auto bottom                   = Bottom.load(std::memory_order_relaxed);
+    Objects[wrappedIndex(bottom)] = object;
 
     // Ensure that the compiler does not reorder this instruction and the
     // setting of the object above, otherwise the object seems added (since the
@@ -122,6 +144,7 @@ class WorkStealingQueue {
   /// Returns an optional type which is in a valid state if the queue is not
   /// empty.
   OptionalType pop() {
+    using namespace std::experimental;
     auto bottom = Bottom - 1;
     Bottom.store(bottom, std::memory_order_relaxed);
 
@@ -131,6 +154,7 @@ class WorkStealingQueue {
     // All non-relaxed atomic operations cause ordering within their own thread,
     // so this acquire operation is a barrier between it and the store above.
     auto top = Top.load(std::memory_order_acquire);
+
     if (top > bottom) {
       Bottom.store(top, std::memory_order_relaxed);
       return OptionalType{};
@@ -144,10 +168,12 @@ class WorkStealingQueue {
     // be a race between this method and steal() to get it. If this exchange is
     // true then this method won the race (or was not in one) and then the
     // object can be returned, otherwise the queue has already been emptied.
-    bool exchange = Top.compare_exchange_strong(top + 1                  ,
-                                                top                      ,
-                                                std::memory_order_release);
-    return exchange ? object : OptionalType{};
+    bool exchanged = Top.compare_exchange_strong(top                      ,
+                                                 top + 1                  ,
+                                                 std::memory_order_release);
+      
+    Bottom.store(top + 1, std::memory_order_relaxed);
+    return exchanged ? object : OptionalType{};
   }
 
   /// Steals an object from the top of the queue. This returns an optional
@@ -180,11 +206,13 @@ class WorkStealingQueue {
   /// 
   /// Returns a reference to the top element in the queue.
   OptionalType steal() {
+    using namespace std::experimental;
     auto top = Top.load(std::memory_order_relaxed);
 
     // The top variable must be loaded __before__ bottom, incase pop()'s from
     // the queue's thread have modified the queue.
     auto bottom = Bottom.load(std::memory_order_acquire);
+
     if (top >= bottom)
       return OptionalType{};
 
@@ -199,14 +227,16 @@ class WorkStealingQueue {
     bool exchanged = Top.compare_exchange_strong(top                      ,
                                                  top + 1                  ,
                                                  std::memory_order_release);
+
     return exchanged ? object : OptionalType{};
   }
 
   /// Returns the number of elements in the queue. This __does not__ always
   /// return the actualy size, but an approximation of the size since both
   /// Top can be modified by another thread which steals.
-  SizeType size() const noexcept { 
-    return Bottom - Top;
+  SizeType size() const noexcept {
+    return Bottom.load(std::memory_order_relaxed) -
+           Top.load(std::memory_order_relaxed);
   }
 
  private:
@@ -230,9 +260,9 @@ class WorkStealingQueue {
 
   //==--- Members ----------------------------------------------------------==//
   
-  Container  Objects;       //!< Container of tasks.
-  AtomicType Top      = 0;  //!< The index of the top element of the deque.
-  Atomicype  Bottom   = 0;  //!< The index of the bottom element of the queue.
+  ContainerType Objects;       //!< Container of tasks.
+  AtomicType    Top      = 0;  //!< The index of the top element.
+  AtomicType    Bottom   = 0;  //!< The index of the bottom element.
                      
   //==--- Methods ----------------------------------------------------------==//
   
