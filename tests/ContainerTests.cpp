@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 #include <chrono>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 // This barrier is used to start threads at a similar time.
@@ -28,7 +29,7 @@ std::atomic<int> barrier = 0;
 class CircularDequeueTest : public ::testing::Test {
  protected:
   /// Defines the number of elements in the dequeue.
-  static constexpr std::size_t queueSize    = 1 << 20;
+  static constexpr std::size_t queueSize    = 1 << 23;
   /// Defines the number of element to push onto the queue.
   static constexpr std::size_t testElements = queueSize << 2;
 
@@ -172,51 +173,26 @@ TEST_F(CircularDequeueTest, CanPopSingleThreaded) {
 // dequeue will not grow and there will be constant contention to get the first
 // element.
 //
-// Each thread stores the results of popped or stolen items, and if there is
-// global ordering, and no item appears in multiple thread's results, then there
-// has not been any error.
+// Each thread stores the results of popped or stolen items, and ifno item
+// appears in multiple thread's results, then there has not been any error.
 TEST_F(CircularDequeueTest, PopAndStealRaceCorrectly) {
   Voxx::System::CpuInfo::refresh();
   setUp();
   run();
   join();
 
-  // Each of the results vectors should be sorted, since stealing threads steal
-  // from the top (i.e 0, 1 ..... ), and the pushing thread only pops a single
-  // element before pushing again.
-  for (const auto& res : results) {
-    std::size_t i = 0;
-    auto correct = [] (const auto& a, const auto& b) { return a < b; };
-    for (; i < res.size() - 1; ++i)
-      if (!correct(res[i], res[i + 1])) { break; }
-    ASSERT_EQ(i, res.size() - 1);
-  }
-
   // Check that each item was only taken off the queue once:
   std::vector<size_t> counters(results.size(), 0);
-  for (std::size_t element = 0; element < testElements; ++element) {
-    bool found = false;
-
-    // Check if one of the results containers has the value.
-    for (std::size_t resIndex = 0;  resIndex < results.size(); ++resIndex) {
-      const auto& result     = results[resIndex];
-      auto&       resCounter = counters[resIndex];
-      if (result.size() > resCounter) {
-        // If the container has the result then check if it's already been
-        // found, in which case there is an error, otherwise just set that
-        // it was found.
-        if (result[resCounter] == element) {
-          // Failed because more than one thread had the element.
-          if (found) {
-            ASSERT_TRUE(false);
-          }
-        
-          found = true;
-          resCounter++;
-        }
+  std::unordered_map<std::size_t, std::size_t> resultMap;
+  for (std::size_t i = 0; i < results.size(); ++i) {
+    for (const auto& res : results[i]) {
+      auto search = resultMap.find(res);
+      if (search != resultMap.end()) {
+        printf("Duplicate: %12i in threads: %2lu and %2lu\n",
+               res, i, search->second);
       }
+      resultMap.insert({res, i});
     }
-    ASSERT_TRUE(found);
   }
 }
 
