@@ -145,7 +145,7 @@ class CircularDequeue {
   /// empty.
   OptionalType pop() {
     using namespace std::experimental;
-    auto bottom = Bottom - 1;
+    auto bottom = Bottom.load(std::memory_order_relaxed) - 1;
     Bottom.store(bottom, std::memory_order_relaxed);
 
     // This acts as a barrier to ensure that top is always set __after__ bottom,
@@ -207,11 +207,11 @@ class CircularDequeue {
   /// Returns a reference to the top element in the queue.
   OptionalType steal() {
     using namespace std::experimental;
-    auto top = Top.load(std::memory_order_relaxed);
+    auto top = Top.load(std::memory_order_acquire);
 
     // The top variable must be loaded __before__ bottom, incase pop()'s from
     // the queue's thread have modified the queue.
-    auto bottom = Bottom.load(std::memory_order_acquire);
+    auto bottom = Bottom.load(std::memory_order_relaxed);
 
     if (top >= bottom)
       return OptionalType{};

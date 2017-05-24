@@ -18,6 +18,7 @@
 #include <Voxel/Thread/Thread.hpp>
 #include <gtest/gtest.h>
 #include <chrono>
+#include <mutex>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -29,7 +30,7 @@ std::atomic<int> barrier = 0;
 class CircularDequeueTest : public ::testing::Test {
  protected:
   /// Defines the number of elements in the dequeue.
-  static constexpr std::size_t queueSize    = 1 << 23;
+  static constexpr std::size_t queueSize    = 1 << 25;
   /// Defines the number of element to push onto the queue.
   static constexpr std::size_t testElements = queueSize << 2;
 
@@ -37,6 +38,7 @@ class CircularDequeueTest : public ::testing::Test {
   using DataType   = int;
   /// Alias for the type of the queue.
   using QueueType  = Voxx::Conky::CircularDequeue<DataType, queueSize>;
+  /// Alias for the type of the restults container.
   using ResultType = std::vector<DataType>;
 
   /// This constantly tries to steal elements from the queue, and stores any
@@ -45,6 +47,7 @@ class CircularDequeueTest : public ::testing::Test {
   /// \param[in] totalThreads The total number of threads used for the test.
   void steal(int threadIdx, int totalThreads) {
     Voxx::Thread::setAffinity(threadIdx);
+    thread_local auto threadResults = ResultType{};
     barrier.fetch_add(1);
 
     // Spin while we wait for other theads:
@@ -55,9 +58,12 @@ class CircularDequeueTest : public ::testing::Test {
       // This loop is to avoid contention on the atomic:
       for (std::size_t i = 0; i < testElements; ++i)
         if (auto result = queue.steal()) {
-          results[threadIdx].push_back(*result);
+          threadResults.push_back(*result);
         }
     }
+
+    std::lock_guard<std::mutex> guard(resultMutex);
+    results[threadIdx] = threadResults;
   }
 
   /// This constantly pushes elements onto the queue, occasionally popping some.
@@ -65,6 +71,7 @@ class CircularDequeueTest : public ::testing::Test {
   /// \param[in] totalThreads   The total number of threads running.
   void pushAndPop(int threadIdx, int totalThreads) {
     Voxx::Thread::setAffinity(threadIdx);
+    thread_local auto threadResults = ResultType{};
     barrier.fetch_add(1);
 
     // Wait until all threads are ready:
@@ -79,8 +86,14 @@ class CircularDequeueTest : public ::testing::Test {
 
       if (i & 1ull)
         if (auto result = queue.pop())
-          results[threadIdx].push_back(*result);
+          threadResults.push_back(*result);
     }
+
+    // We don't need the lock here because the strealing threads can only
+    // execute their writes to the global results container when this thread
+    // tells them to stop stealing.
+    results[threadIdx] = threadResults;
+
     // Tell the other threads to stop:
     barrier.store(0);
   }
@@ -92,7 +105,8 @@ class CircularDequeueTest : public ::testing::Test {
       queue.push(elements);
   }
 
-  /// Starts the threads.
+  /// Starts the threads by setting the first thread to push and pop, and
+  /// setting the other threads to constantly steal from the queue.
   void run() {
     const std::size_t cores = Voxx::System::CpuInfo::cores();
     threads.emplace_back(&CircularDequeueTest::pushAndPop, this, 0, cores);
@@ -128,9 +142,10 @@ class CircularDequeueTest : public ::testing::Test {
     }
   }
 
-  QueueType                queue;   //!< The queue to test.
-  std::vector<ResultType>  results; //!< Vectors of results for each thread.
-  std::vector<std::thread> threads; //!< Thread to test the queue with.
+  QueueType                queue;       //!< The queue to test.
+  std::vector<ResultType>  results;     //!< Vectors of results for each thread.
+  std::vector<std::thread> threads;     //!< Thread to test the queue with.
+  std::mutex               resultMutex; //!< Mutex for pushing results.
 };
 
 TEST_F(CircularDequeueTest, CorrectlyDeterminesSize) {
@@ -185,13 +200,22 @@ TEST_F(CircularDequeueTest, PopAndStealRaceCorrectly) {
   std::vector<size_t> counters(results.size(), 0);
   std::unordered_map<std::size_t, std::size_t> resultMap;
   for (std::size_t i = 0; i < results.size(); ++i) {
-    for (const auto& res : results[i]) {
-      auto search = resultMap.find(res);
+    for (const auto& result : results[i]) {
+      auto search = resultMap.find(result);
       if (search != resultMap.end()) {
-        printf("Duplicate: %12i in threads: %2lu and %2lu\n",
-               res, i, search->second);
+        printf("Duplicate: %12i, threads: %2lu,%2lu\n", 
+               result, i, search->second);
+        EXPECT_TRUE(false);
       }
-      resultMap.insert({res, i});
+      resultMap.insert({result, i});
+    }
+  }
+
+  for (std::size_t element = 0; element < testElements; ++element) {
+    auto found = resultMap.find(element);
+    if (found == resultMap.end()) {
+      printf("Element %12lu was not found\n", element);
+      EXPECT_TRUE(false);
     }
   }
 }
