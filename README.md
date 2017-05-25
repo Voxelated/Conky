@@ -25,5 +25,3 @@ found at: [[repository](https://github.com/Voxelated/Voxel)|
 ## Licensing
 
 This is completely free software, you can do whatever you like with it.
-
-

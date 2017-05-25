@@ -22,7 +22,9 @@ namespace Voxx   {
 namespace Conky  {
 namespace Thread {
 
-/// Returns the index of the currently executing thread.
-std::size_t threadIndex();
+/// Returns the index of the currently executing thread. This needs to be set
+/// appropriately by a thread on startup, or should be wrapped by an interface
+/// which potentially remaps this value. This will always return a unique value.
+static thread_local std::size_t threadId = 0;
 
 }}} // namespace Voxx::Conky::Thread

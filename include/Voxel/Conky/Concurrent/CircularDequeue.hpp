@@ -146,14 +146,13 @@ class CircularDequeue {
   OptionalType pop() {
     using namespace std::experimental;
     auto bottom = Bottom.load(std::memory_order_relaxed) - 1;
-    Bottom.store(bottom, std::memory_order_relaxed);
 
-    // This acts as a barrier to ensure that top is always set __after__ bottom,
-    // and that neither the compiler nor the cpu reorder the instructions.
-    
-    // All non-relaxed atomic operations cause ordering within their own thread,
-    // so this acquire operation is a barrier between it and the store above.
-    auto top = Top.load(std::memory_order_acquire);
+    // We use sequential consistant memory ordering to ensure that the load to
+    // top always happens after to load to bottom above. Unfortunately, tests
+    // have shown that this is necessary, and that there is a performance hit.
+    Bottom.store(bottom, std::memory_order_seq_cst);
+
+    auto top = Top.load(std::memory_order_relaxed);
 
     if (top > bottom) {
       Bottom.store(top, std::memory_order_relaxed);
@@ -172,7 +171,14 @@ class CircularDequeue {
                                                  top + 1                  ,
                                                  std::memory_order_release);
       
-    Bottom.store(top + 1, std::memory_order_relaxed);
+    // This is also a little tricky: If we lost the race, top will be changed to
+    // the new value set by the stealing thread (i.e it's already incremented).
+    // If it's incremented again then Bottom > Top when the last item was
+    // actually just cleared. This is also the unlikely case -- since this path
+    // is only executed when there is contention on the last element -- so the
+    // const of the branch is acceptable.
+    Bottom.store(top + (exchanged ? 1 : 0), std::memory_order_relaxed);
+
     return exchanged ? object : OptionalType{};
   }
 
@@ -207,10 +213,10 @@ class CircularDequeue {
   /// Returns a reference to the top element in the queue.
   OptionalType steal() {
     using namespace std::experimental;
-    auto top = Top.load(std::memory_order_acquire);
 
-    // The top variable must be loaded __before__ bottom, incase pop()'s from
-    // the queue's thread have modified the queue.
+    // Top must be loaded before bottom, so we use acquire ordering since it
+    // ensures that everyting below it stays below it.
+    auto top    = Top.load(std::memory_order_acquire);
     auto bottom = Bottom.load(std::memory_order_relaxed);
 
     if (top >= bottom)
