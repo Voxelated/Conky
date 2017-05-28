@@ -18,13 +18,40 @@
 #include "ThreadPoolException.hpp"
 #include <Voxel/Conky/Concurrent/CircularDequeue.hpp>
 #include <Voxel/Conky/Thread/Thread.hpp>
+#include <Voxel/Thread/Thread.hpp>
+#include <Voxel/SystemInfo/SystemInfo.hpp>
+#include <Voxel/Utility/Debug.hpp>
+#include <thread>
 #include <vector>
+#include <experimental/random>
 
 namespace Voxx  {
 namespace Conky {
 
 /// The ThreadPool class stores per thread circular dequeues of some objects.
-/// The objects could be anything: callable's, data, etc.
+/// The objects could be anything: callable's, data, etc, and the type of the
+/// objects is inferred from the Handler. To create a thread pool to handle
+/// only integers, one might do the following:
+/// 
+/// ~~~cpp
+/// template <typename T>
+/// struct SomeHandler {
+///   void operator()(const T& object) const noexcept {
+///     callSomeFunction(obeject);
+///   }
+/// };
+/// 
+/// using IntHandler      = SomeHandler<int>;
+/// using IntHandlingPool = ThreadPool<IntHandler>;
+/// ~~~
+/// 
+/// The pool may then be used as follows:
+/// 
+/// ~~~
+/// IntHandlingPool pool;
+/// 
+/// pool.push()
+/// 
 /// \tparam Object  The type of object to store in the per thread object pools.
 /// \tparam Handler The handler for when objects are taken from the queue.
 template <typename Object, typename Handler, std::size_t QueueSize = 2048>
@@ -32,14 +59,10 @@ class ThreadPool {
  private:
   //==--- Constants --------------------------------------------------------==//
   
-  /// Defines the size of the required alignment to to avoid false sharing.
-  static constexpr std::size_t nonDestructiveSize =
-    std::hardware_destructive_interface_size;
-
   /// The Worker struct contains a queue of objects for the worker to work on,
   /// and a flag which allows it to be interrupted/suspended, etc. The alignment
   /// of the struct ensures that there is no false sharing between workers.
-  alignas(nonDestructiveSize) struct Worker {
+  struct alignas(System::destructiveInterfaceSize()) Worker {
     //==--- Aliases --------------------------------------------------------==//
     
     /// Alias for the type of the object queue.
@@ -59,7 +82,7 @@ class ThreadPool {
   /// Defines the type of container used to store each of the object pools.
   using WorkerPool      = std::vector<Worker>;
   /// Defines the type of thread container.
-  using ThreadContainer = std::vector<Threads>;
+  using ThreadContainer = std::vector<std::thread>;
   /// Defines the type of the handler to use when extracting objects from
   /// thread local object pools.
   using HandlerType     = Handler;
@@ -71,11 +94,11 @@ class ThreadPool {
   ThreadPool(std::size_t numThreads, HandlerType&& hander = HandlerType())
   : Workers(numThreads) {
     // \todo Add warning if numThreads > physical cores.
-    // Debug::catcher([numThreads] () {
-    //  if (numThreads > System::CpuInfo::cores())
-    //    throw ThreadPoolException(
-    //      ThreadPoolException::Type::Oversubscription);
-    // });
+    Debug::catcher([numThreads] () {
+      if (numThreads > System::CpuInfo::cores())
+        throw ThreadPoolException(
+          ThreadPoolException::Type::Oversubscription);
+    });
     createThreads(numThreads);
     runAllWorkers();
   }
@@ -90,24 +113,25 @@ class ThreadPool {
   /// Pushes an object onto the worker queue for the current thread.
   /// \tparam object The object to push onto the worker queue.
   void push(const Object& object) {
+    //printf("Pushed: %u\n", Thread::threadId);
     // // Spin while full ..
-    while (workers[Thread::threadId].size() == QueueSize) {}
-    workers[Thread::threadId].push(object);
+    //while (Workers[Thread::threadId].objects.size() == QueueSize) {}
+    Workers[Thread::threadId].objects.push(object);
   }
 
   /// Moves an object onto the worker queue for the current thread.
   /// \tparam object The object to move onto the worker queue.
-  void push(Object object) {
+  void push(Object&& object) {
     // Spin while full ..
-    while (workers[Thread::threadId].size() == QueueSize) {}
-    workers[Thread::threadId].push(std::move(object));
+    while (Workers[Thread::threadId].objects.size() == QueueSize) {}
+    Workers[Thread::threadId].objects.push(std::move(object));
   }
   
   /// Stops the threads. Currently this just joins them, but really this should
   /// interrupt the threads if they are running.
   void shutdown() noexcept {
     for (auto& worker : Workers)      
-      worker.runnable.store(false, std::memory_order_release);
+      worker.runnable.store(false, std::memory_order_relaxed);
 
     for (auto& thread : Threads)
       thread.join();
@@ -127,7 +151,7 @@ class ThreadPool {
 
   /// Sets all threads to runnable.
   void runAllWorkers() {
-    for (const auto& worker : Workers)
+    for (auto& worker : Workers)
       worker.runnable.store(true, std::memory_order_relaxed);
   }
 
@@ -135,19 +159,25 @@ class ThreadPool {
   /// \param[in] threadIndex The index of the thread and worker, and the global
   ///                        index of the thread.
   void process(std::size_t threadIndex) {
-    Thread::setAffinity(threadIndex);
+    ::Voxx::Thread::setAffinity(threadIndex);
 
     // The global threadId is set to the thread index so that when pushing to
     // the thread pool, the correct worker can be accessed extremely quickly.
-    Thread::threadId = threadIndex;
-    auto& worker     = Worker[threadIndex];
+    Thread::threadId   = threadIndex;
+    auto& worker       = Workers[threadIndex];
+    std::size_t randId = 0;
+    // std::experimental::randint(std::size_t(0), threadIndex);
 
     while (worker.runnable.load(std::memory_order_relaxed)) {
-      if (auto object = worker.objects.pop()) {
-        ObjectHandler(std::move(*object));
-      } else {
-        // Need to steal from one of the other workers.
-        
+      auto object = worker.objects.pop();
+      if (object) {
+        ObjectHandler(*object);
+        continue;
+      }
+      object = Workers[randId].objects.pop();
+      // Need to steal from one of the other workers.
+      if (object) {
+        ObjectHandler(*object);
       }
     }
   }
