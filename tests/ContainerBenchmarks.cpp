@@ -14,98 +14,160 @@
 //==------------------------------------------------------------------------==//
 
 #include <Voxel/Conky/Concurrent/StaticStealableQueue.hpp>
+#include <Voxel/Conky/Container/Task.hpp>
+#include <Voxel/Conky/Thread/Thread.hpp>
+#include <Voxel/SystemInfo/SystemInfo.hpp>
 #include <benchmark/benchmark.h>
 #include <thread>
-#include <unordered_map>
-#include <experimental/random>
 
-/*
-template <typename T>
-struct Handler {
-  void operator()(const T& object) noexcept {
-  }
-};
+// Tests the performance of pusing onto the queue.
+template <typename ObjType, std::size_t Size>
+static void BmPush(benchmark::State& state, int elements) {
+  using namespace Voxx;
+  using QueueType = Conky::StaticStealableQueue<ObjType, Size>;
+  Thread::setAffinity(state.thread_index % System::CpuInfo::cores());
 
-using IntThreadPool =
-  Voxx::Conky::ThreadPool<unsigned int, Handler<unsigned int>, 1048574>;
-
-// The throughput test is to test the ability of the thread pool to process
-// elements.
-static void
-benchmarkThreadPoolSPSCThroughput(benchmark::State& state, unsigned int iters) {
-  Voxx::System::CpuInfo::refresh();
-
-  // Create a 2-thread thread pool : 1 processing thread, one submission thread.
-  IntThreadPool threadPool(2);
+  QueueType queue;
   while (state.KeepRunning()) {
-    for (unsigned int i = 0; i < iters; ++i) {
-      threadPool.push(i);
+    for (int i = 0; i < elements; ++i)
+      queue.push(ObjType());
+  }
+}
+
+// Tests the performance of having one thread push and the others steal. I.e
+// with 2 threads, the queue acts as an SPSC queue, for 3 threads its SPMC with
+// 2 consumers, and with 4 threads is SPMC with 3 consumers, etc.
+template <typename ObjType, std::size_t Size>
+static void BmPushSteal(benchmark::State& state, int elements) {
+  using namespace Voxx;
+  using QueueType = Conky::StaticStealableQueue<ObjType, Size>;
+  Thread::setAffinity(state.thread_index % System::CpuInfo::cores());
+
+  static QueueType queue;
+  static int       barrier;
+  if (state.thread_index != 0) {
+    while (barrier != state.threads) {};
+  } else {
+    barrier = state.threads;
+  }
+
+  while (state.KeepRunning()) {
+    if (state.thread_index == 0) {
+      barrier = state.threads;
+      for (int i = 0; i < elements; ++i)
+        queue.push(ObjType());
+    } else if (state.thread_index >= 1) {
+      while (queue.size() && barrier != -1) {
+        if (auto res = queue.steal()) {
+          benchmark::DoNotOptimize(*res);
+        }
+      }
     }
-  }
-}
-*/
 
-static void benchmarkRandGenVoxel(benchmark::State& state) {
-  uint32_t r = 0;
-  while (state.KeepRunning()) {
-    benchmark::DoNotOptimize(r = Voxx::Math::randint(0, 10));
-  }
-}
-
-static void benchmarkRandGenStd(benchmark::State& state) {
-  int r = 0;
-  while (state.KeepRunning()) {
-    benchmark::DoNotOptimize(r = std::experimental::randint(0, 10));
-  }
-}
-
-// This tests the performance of querying a thread id from a vector of thread
-// ids.
-static void benchmarkThreadIdVector(benchmark::State& state) {
-  std::vector<std::thread::id> ids{
-    std::thread::id(), std::thread::id(),
-    std::thread::id(), std::thread::id(),
-    std::thread::id(), std::thread::id(),
-    std::thread::id(), std::thread::id(),
-    std::this_thread::get_id()};
-
-  while (state.KeepRunning()) {
-    auto id = std::this_thread::get_id();
-    for (std::size_t i = 0; i < ids.size(); ++i) {
-      if (ids[i] == id)
-        break;
+    // Tell workers to stop:
+    if (state.thread_index == 0) {
+      barrier = -1;
     }
   }
 }
 
-// This tests the performance of using a thread local thread id.
-static thread_local std::size_t threadid = 0;
-static void benchmarkThreadIdThreadLocal(benchmark::State& state) {
-  std::size_t v = 0;
-  while (state.KeepRunning())
-    benchmark::DoNotOptimize(v = threadid);
+// Tests the performance of having one thread push and the others steal, when
+// the container stores tasks.
+template <std::size_t Size>
+static void BmPushStealTask(benchmark::State& state, int elements) {
+  using namespace Voxx;
+  using TaskType  = Conky::Task<64>;
+  using QueueType = Conky::StaticStealableQueue<TaskType, Size>;
+  Thread::setAffinity(state.thread_index % System::CpuInfo::cores());
 
-}
-
-// This tests the performance of using a hash for storing a thread id.
-static void benchmarkThreadIdHash(benchmark::State& state) {
-  std::unordered_map<std::thread::id, std::size_t> ids;
-  ids[std::this_thread::get_id()] = 4;
+  static QueueType        queue;
+  static std::atomic<int> barrier = 0;
+  if (state.thread_index != 0) {
+    while (barrier != state.threads) {}
+  } else {
+    barrier = state.threads;
+  }
 
   while (state.KeepRunning()) {
-    benchmark::DoNotOptimize(ids[std::this_thread::get_id()]);
+    if (state.thread_index == 0) {
+      for (int i = 0; i < elements; ++i) {
+        queue.push([] {
+          int res = 0;
+          benchmark::DoNotOptimize(res++);
+        });
+      }
+    } else if (state.thread_index >= 1) {
+      while (queue.size() && barrier.load(std::memory_order_relaxed) != -1) {
+        if (auto res = queue.steal()) {
+          res->executor->execute();
+        }
+      }
+    }
+
+    // Tell workers to stop:
+    if (state.thread_index == 0) {
+      barrier = -1;
+    }
   }
 }
 
-//==--- Thread related benchmarks ------------------------------------------==//
 
-BENCHMARK(benchmarkThreadIdVector);
-BENCHMARK(benchmarkThreadIdThreadLocal);
-BENCHMARK(benchmarkThreadIdHash);
-BENCHMARK(benchmarkRandGenVoxel);
-BENCHMARK(benchmarkRandGenStd);
-//BENCHMARK_CAPTURE(benchmarkThreadPoolSPSCThroughput, intThreadPool, 65000);
+// This provides a reference for the task versus if the task was inlined.
+static void BmTaskInlineReference(benchmark::State& state, int elements) {
+  int x;
+  while (state.KeepRunning()) {
+    for (int i = 0; i < elements; ++i) {
+      benchmark::DoNotOptimize(x++);
+    }
+  }
+}
+
+// This tests the performance of calling a task.
+template <std::size_t TaskSize>
+static void BmTaskInvoke(benchmark::State& state, int elements) {
+  using TaskType = Voxx::Conky::Task<TaskSize>;
+  TaskType task([]  {
+    int x;
+    benchmark::DoNotOptimize(x++);
+  });
+
+  while (state.KeepRunning()) {
+    for (int i = 0; i < elements; ++i) {
+      task.executor->execute();
+    }
+  }
+}
+
+//==--- Constants ----------------------------------------------------------==//
+
+static constexpr int         testElements = 1000000;
+static constexpr std::size_t queueSize    = 1 << 20;
 
 //==------------------------------------------------------------------------==//
 
-BENCHMARK_MAIN();
+int main(int argc, char** argv) {
+  using namespace benchmark;
+  Voxx::System::CpuInfo::refresh();
+
+  RegisterBenchmark(
+    "StealableQueuePush", BmPush<int, queueSize>, testElements)
+    ->UseRealTime()->Threads(1);
+  RegisterBenchmark(
+    "StealableQueuePushSteal", BmPushSteal<int, queueSize>, testElements)
+    ->UseRealTime()->DenseThreadRange(1, 4, 1);
+  RegisterBenchmark(
+    "StealableQueuePushStealTask", BmPushStealTask<queueSize>, testElements)
+    ->UseRealTime()->Threads(4);
+  RegisterBenchmark(
+    "TaskReference", BmTaskInlineReference, testElements)
+    ->UseRealTime()->Threads(1);
+  RegisterBenchmark(
+    "TaskInvoke64Byte", BmTaskInvoke<64>, testElements)
+    ->UseRealTime()->Threads(1);
+  RegisterBenchmark(
+    "TaskInvoke128Byte", BmTaskInvoke<128>, testElements)
+    ->UseRealTime()->Threads(1);
+
+  Initialize(&argc, argv);
+  RunSpecifiedBenchmarks();
+}

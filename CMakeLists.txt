@@ -41,7 +41,7 @@ endif()
 #==--- Set CXXFLAGS ---------------------------------------------------------==#
 
 if(CMAKE_BUILD_TYPE MATCHES Release)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_RELEASE}"
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_RELEASE} -g"
       CACHE STRING "CXX FLAGS" FORCE)
 else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_DEBUG}" CACHE STRING "CXX FLAGS" FORCE)

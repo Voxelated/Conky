@@ -20,6 +20,7 @@
 #include <Voxel/Thread/Thread.hpp>
 #include <array>
 #include <atomic>
+#include <experimental/optional>
 
 namespace Voxx  {
 namespace Conky {
@@ -39,9 +40,25 @@ namespace Conky {
 /// 
 /// The tryPush function calls push if the queue is not full.
 /// 
-/// Pop and steal will return a nullptr if the queue is empty, or if another
+/// Pop and steal will return a nullopt if the queue is empty, or if another
 /// thread stole the last element before they got to it. Otherwise they will
 /// return a pointer to the object.
+/// 
+/// To provide an API that does not easily introduce bugs, all returned objects
+/// are __copies__, thus the queue is not suitable for large objects. This is
+/// because providing a reference or pointer to an element introduces a
+/// potential race between the use of that element and a push to the queue.
+/// 
+/// Consider if the queue is full. Calling ``tryPush`` returns false, as one
+/// would expect, and calling ``steal`` returns the oldest element (say at
+/// index 0), and increments top (to 1). Another call to ``tryPush`` then
+/// succeeds because the queue is not at capacity, but it creates the new
+/// element in the same memory location as the element just stolen. Therefore,
+/// if a pointer is returned, there is a race between the stealing thread to use
+/// the element pointed to, and the pushing thread overwriting the memory. Such
+/// a scenario is too tricky to use correctly to include in the API. Therefore,
+/// benchmark the queue for the required data type (generic benchmarking code
+/// is provided in the test suite).
 /// 
 /// Also note that due to the multi-threaded nature of the queue, a call to
 /// size only returns the size of the queue at that point in time, and it's
@@ -77,6 +94,8 @@ class StaticStealableQueue {
   using AtomicType    = std::atomic<SizeType>;
   /// Defines the type of the objects in the queue.
   using ObjectType    = Object;
+  /// Defines an optional typeto use when returning value types.
+  using OptionalType  = std::experimental::optional<ObjectType>;
   /// Defines the type of container used to store the queue's objects.
   using ContainerType = std::array<ObjectType, MaxObjects>;
 
@@ -106,7 +125,7 @@ class StaticStealableQueue {
   /// Returns true if a new object was pushed onto the queue.
   template <typename... ObjectArgs>
   bool tryPush(ObjectArgs&&... args) {
-    if (size() == MaxObjects)
+    if (size() >= MaxObjects)
       return false;
 
     push(std::forward<ObjectArgs>(args)...);
@@ -115,19 +134,7 @@ class StaticStealableQueue {
   
   /// Pops an object from the front of the queue. This returns an optional
   /// type which holds either the object at the bottom of the queue (the most
-  /// recently added object) or an invalid optional. We copy the object into the
-  /// optional as it does not make sense to do anything else. Other options
-  /// would be:
-  /// 
-  /// 1. Return a reference or pointer: This is just too error prone, since a
-  ///    subsequent call to push would then overwrite the value being referenced
-  ///    , which is obviously not an option.
-  ///   
-  /// 2. Move returned object into the result: This isn't a valid option since
-  ///    the memory needs to be reused to store subsequent objects added to the
-  ///    queue.
-  ///    
-  /// Thus the usage is:
+  /// recently added object) or an invalid optional.
   /// 
   /// ~~~cpp
   /// // If using the object directly:
@@ -142,7 +149,8 @@ class StaticStealableQueue {
   /// 
   /// Returns an optional type which is in a valid state if the queue is not
   /// empty.
-  ObjectType* pop() {
+  OptionalType pop() {
+    using namespace std::experimental;
     auto bottom = Bottom.load(std::memory_order_relaxed) - 1;
 
     // Sequentially consistant memory ordering is used here to ensure that the
@@ -153,13 +161,12 @@ class StaticStealableQueue {
     Bottom.store(bottom, std::memory_order_seq_cst);
 
     auto top = Top.load(std::memory_order_relaxed);
-
     if (top > bottom) {
       Bottom.store(top, std::memory_order_relaxed);
-      return nullptr;
+      return nullopt;
     }
 
-    auto* object = &Objects[wrappedIndex(bottom)];
+    auto object = make_optional(Objects[wrappedIndex(bottom)]);
     if (top != bottom)
       return object;
 
@@ -179,24 +186,17 @@ class StaticStealableQueue {
     // const of the branch is acceptable.
     Bottom.store(top + (exchanged ? 1 : 0), std::memory_order_relaxed);
 
-    return exchanged ? object : nullptr;
+    return exchanged ? object : nullopt;
   }
 
-  /// Steals an object from the top of the queue. This returns an optional
-  /// type which holds either the object at the top of the queue (the least
-  /// recently added object) or an invalid optional. We copy the object into the
-  /// optional as it does not make sense to do anything else. Other options
-  /// would be:
+  /// Steals an object from the top of the queue. This returns an optional type
+  /// which is the object if the steal was successful, or a default constructed
+  /// optional if not. Since this copies an object from the queue into the
+  /// optional, it is less performant that getting a pointer, however, there is
+  /// no API which can provide a reference an quarentee that the returned object
+  /// is valid (if the underlying storage is a circular queue), so therefore no
+  /// reference API is provided.
   /// 
-  /// 1. Return a reference or pointer: This is just too error prone, since if
-  ///    the queue is almost full, and objects are being pushed very quickly,
-  ///    then the referenced object would be overwritten by the thread pushing
-  ///    to the queue.
-  ///   
-  /// 2. Move returned object into the result: This isn't a valid option since
-  ///    the memory needs to be reused to store subsequent objects added to the
-  ///    queue.
-  ///
   /// Example usage is:
   /// 
   /// ~~~cpp
@@ -210,8 +210,9 @@ class StaticStealableQueue {
   ///   functionUsingObject(*object);
   /// ~~~
   /// 
-  /// Returns a reference to the top element in the queue.
-  ObjectType* steal() {
+  /// Returns a pointer to the top (oldest) element in the queue, or nullptr.
+  OptionalType steal() {
+    using namespace std::experimental;
     // Top must be loaded before bottom, so we use acquire ordering since it
     // ensures that everyting below it stays below it.
     auto top = Top.load(std::memory_order_relaxed);
@@ -222,8 +223,9 @@ class StaticStealableQueue {
     Thread::memoryBarrier();
     auto bottom = Bottom.load(std::memory_order_relaxed);
 
-    if (top >= bottom)
-      return nullptr;
+    if (top >= bottom) {
+      return nullopt;
+    }
 
     // Here the object at top is fetched, and and update to Top is atempted,
     // since the top element is being stolen. __If__ the exchange succeeds,
@@ -232,12 +234,19 @@ class StaticStealableQueue {
     // other threads and the pop() method (potentially), or there was no race.
     // In summary, if the exchange succeeds, the object can be returned,
     // otherwise it can't.
-    auto* object   = &Objects[wrappedIndex(top)];
+    // 
+    // Also note that the object __must__ be created before the exchange to top,
+    // otherwise there will potentially be a race to construct the object and
+    // between a thread pushing onto the queue.
+    // 
+    // This introduces overhead when there is contention to steal, and the steal
+    // is unsuccessful, but in the succesful case there is no overhead.
+    auto object    = make_optional(Objects[wrappedIndex(top)]);
     bool exchanged = Top.compare_exchange_strong(top                      ,
                                                  top + 1                  ,
                                                  std::memory_order_release);
 
-    return exchanged ? object : nullptr;
+    return exchanged ? object : nullopt;
   }
 
   /// Returns the number of elements in the queue. This __does not__ always
@@ -270,12 +279,12 @@ class StaticStealableQueue {
   //==--- Members ----------------------------------------------------------==//
  
   // Note: The starting values are 1 since the element popping pops (bottom - 1)
-  //       so if bottom = 0 to start, then 0 - 1 -> size_t_max, and the pop
+  //       so if bottom = 0 to start, then (0 - 1) = size_t_max, and the pop
   //       function tries to access an out of range element.
-   
+  
   ContainerType Objects;       //!< Container of tasks.
   AtomicType    Top      = 1;  //!< The index of the top element.
-  AtomicType    Bottom   = 1;  //!< The index of the bottom element.
+  AtomicType    Bottom   = 1;  //!< The index of the bottom element. 
                      
   //==--- Methods ----------------------------------------------------------==//
   

@@ -25,7 +25,6 @@ __attribute__((always_inline)) void f(int a, int b) {
 
 // Benchmarks the cost of executing a lambda, for reference against a task.
 static void benchmarkStatelessLambdaRef(benchmark::State& state, int iters) {
-  //auto f = [] (int a, int b) { benchmark::DoNotOptimize(a += b); };
   while (state.KeepRunning())
     for (int i = 0; i < iters; ++i)
       f(1, 2);
@@ -89,6 +88,21 @@ benchmarkStatefullArgCaptureTask(benchmark::State& state, int iters) {
   }
 }
 
+static void modulusOperator(benchmark::State& state, int iters) {
+  int i = 0, mod = 3;
+  while (state.KeepRunning()) {
+    benchmark::DoNotOptimize(i++ % mod);
+  }
+}
+
+static void modulusBinary(benchmark::State& state, int iters) {
+  int i   = 0;
+  int mod = 3;
+  while (state.KeepRunning()) {
+    benchmark::DoNotOptimize(i++ & mod);
+  }
+}
+
 //==--- Register benchmarks ------------------------------------------------==//
 
 BENCHMARK_CAPTURE(benchmarkStatelessLambdaRef     , iters, iterations);
@@ -97,6 +111,8 @@ BENCHMARK_CAPTURE(benchmarkCallableRef            , iters, iterations);
 BENCHMARK_CAPTURE(benchmarkStatelessArgPassTask   , iters, iterations);
 BENCHMARK_CAPTURE(benchmarkStatelessArgCaptureTask, iters, iterations);
 BENCHMARK_CAPTURE(benchmarkStatefullArgCaptureTask, iters, iterations);
+BENCHMARK_CAPTURE(modulusOperator                 , iters, iterations);
+BENCHMARK_CAPTURE(modulusBinary                   , iters, iterations);
 
 //==------------------------------------------------------------------------==//
 

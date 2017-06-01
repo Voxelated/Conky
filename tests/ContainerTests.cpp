@@ -26,14 +26,15 @@
 
 // This barrier is used to start threads at a similar time.
 std::atomic<int> barrier = 0;
+std::mutex       exclusive;
 
 /// Fixture class for work stealing queue tests.
 class StaticStealableQueueTest : public ::testing::Test {
  protected:
   /// Defines the number of elements in the dequeue.
-  static constexpr std::size_t queueSize    = 1 << 22;
+  static constexpr std::size_t queueSize    = 1 << 13;
   /// Defines the number of element to push onto the queue.
-  static constexpr std::size_t testElements = queueSize << 2;
+  static constexpr std::size_t testElements = queueSize << 4;
 
   /// Alias for the type of data in the queue.
   using DataType   = int;
@@ -109,12 +110,19 @@ class StaticStealableQueueTest : public ::testing::Test {
   void run() {
     const std::size_t cores = Voxx::System::CpuInfo::cores();
     threads.emplace_back(&StaticStealableQueueTest::pushAndPop, this, 0, cores);
+    runStealers();
+  }
+
+  /// Runs only stealing threads.
+  void runStealers() {
+    const std::size_t cores = Voxx::System::CpuInfo::cores();
     for (std::size_t i = 1; i < cores; ++i)
       threads.emplace_back(&StaticStealableQueueTest::steal, this, i, cores);
   }
 
   /// Joins the threads.
   void join() {
+    barrier.store(0);
     for (auto& thread : threads)
       thread.join();
   }
@@ -123,22 +131,6 @@ class StaticStealableQueueTest : public ::testing::Test {
   void setUp() {
     for (std::size_t i = 0; i < Voxx::System::CpuInfo::cores(); ++i)
       results.push_back(ResultType());
-  }
-
-  // Prints the first 200 results for each thread.
-  void printResults() {
-    int resultNumber = 0;
-    for (const auto& result : results) {
-      std::cout << "Results : " << resultNumber << "\n";
-      std::size_t stopper = 0;
-      for (const auto& r : result) {
-        if (stopper++ > 200)
-          break;
-        std::cout << r << "\n";
-      }
-      std::cout << "\n";
-      resultNumber++;
-    }
   }
 
   QueueType                queue;       //!< The queue to test.
@@ -195,7 +187,6 @@ TEST_F(StaticStealableQueueTest, CanPopSingleThreaded) {
 // times (approximately 1 day of continuous contention on the last element) and
 // ther were no data races.
 TEST_F(StaticStealableQueueTest, PopAndStealRaceCorrectly) {
-  Voxx::System::CpuInfo::refresh();
   setUp();
   run();
   join();
@@ -221,6 +212,48 @@ TEST_F(StaticStealableQueueTest, PopAndStealRaceCorrectly) {
       printf("Element %12lu was not found\n", element);
       EXPECT_TRUE(false);
     }
+  }
+}
+
+// This test uses tryPush, and should result in each element being found in a
+// result vector. If push is used here instead of tryPush, it's possible that
+// the queue would have overflowed before one of the workers was able to steal
+// the first elements pushed, and therefore some of the early elements wont
+// be found.
+TEST_F(StaticStealableQueueTest, TryPushIsSafe) {
+  Voxx::Thread::setAffinity(0);
+  barrier.store(0);
+
+  setUp();
+  runStealers();
+
+  barrier.fetch_add(1);
+  for (std::size_t i = 0; i < queueSize * 2; ++i)
+    while (!queue.tryPush(static_cast<DataType>(i))) {}
+
+  while (queue.size()) {}
+  join();
+
+  // Check that every element is in a result vector.
+  std::vector<size_t> counters(results.size(), 0);
+  for (std::size_t element = 0; element < queueSize * 2; ++element) {
+    bool found = false;
+    for (std::size_t j = 0; j < results.size(); ++j) {
+      if (results[j].empty())
+        continue;
+
+      auto& index     = counters[j];
+      auto& container = results[j];
+      if (container[index] == element) {
+        found = true;
+        index++;
+      }
+    }
+    if (!found) {
+      printf("Element %12lu was not found\n", element);
+      ASSERT_TRUE(false);
+    }
+    EXPECT_TRUE(found);
   }
 }
 
@@ -254,7 +287,71 @@ TEST(TaskTests, CanCreateModifyReferencesByCaptureInExecution) {
     EXPECT_EQ(element, 3.14);
 }
 
+TEST(TaskTests, CanCopyTasks) {
+  using Task = Voxx::Conky::Task<128>;
+  int result = 0;
+
+  Task task([&result] {
+    result++;
+  });
+  task.executor->execute();
+  EXPECT_EQ(result, 1);
+
+  auto copiedTask = task;
+  copiedTask.executor->execute();
+  EXPECT_EQ(result, 2);
+}
+
+// Although this specific implementation is not how tasks should be used (where
+// multiple tasks need mutual exclusion for some of the task data), it does
+// correctly test that the same task can be executed from multiple threads
+// without error, and that tasks can be copied between threads.
+TEST(TaskTests, CanInvokeTasksFromMultipleThreads) {
+  Voxx::Thread::setAffinity(0);
+  std::vector<Voxx::Conky::Task<64>> tasks;
+  barrier.store(0);
+  int result = 0, iters = 10;
+
+  tasks.push_back([&result] {
+    std::lock_guard<std::mutex> guard(exclusive);
+    result++;
+  });
+
+  auto t1 = std::thread([&tasks, iters] {
+    Voxx::Thread::setAffinity(1);
+    barrier.fetch_add(1, std::memory_order_relaxed);
+    while (barrier.load(std::memory_order_relaxed) != 2) {}
+
+    for (int i = 0; i < iters; ++i)
+      tasks.front().executor->execute();
+
+    // Check copying to thread:
+    auto task = tasks.front();
+    for (int i = 0; i < iters; ++i)
+      task.executor->execute();
+  });
+  auto t2 = std::thread([&tasks, iters] {
+    Voxx::Thread::setAffinity(2);
+    barrier.fetch_add(1, std::memory_order_relaxed);
+    while (barrier.load(std::memory_order_relaxed) != 2) {}
+
+    for (int i = 0; i < iters; ++i)
+      tasks.front().executor->execute();
+
+    // Check copying to thread:
+    auto task = tasks.front();
+    for (int i = 0; i < iters; ++i)
+      task.executor->execute();
+  }); 
+
+  t1.join();
+  t2.join();
+
+  EXPECT_EQ(result, iters * 4);
+}
+
 int main(int argc, char** argv) {
+  Voxx::System::CpuInfo::refresh();
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
