@@ -172,7 +172,6 @@ class ThreadPool {
 
     // The first thread is always the controlling thread.
     Voxx::Thread::setAffinity(0);
-
     makeWorkersRunnable();
     createWorkers(numThreads - 1);
   }
@@ -194,8 +193,10 @@ class ThreadPool {
   template <typename TaskCallable, typename... TaskArgs>
   bool tryPush(TaskCallable&& callable, TaskArgs&&... args) {
     auto& tasks = TaskQueues[Thread::threadId].tasks;
-    if (tasks.size() >= TasksPerQueue)
+    if (tasks.size() >= TasksPerQueue) {
+      // co_await pop();
       return false;
+    }
 
     tasks.push(std::forward<TaskCallable>(callable) ,
                std::forward<TaskArgs>(args)...      );
@@ -235,6 +236,11 @@ class ThreadPool {
     return count;
   }
 
+  /// Waits until the thread pool has no work.
+  void waitTillIdle() const noexcept {
+    while (!isEmpty()) { /* Spin ... */ }
+  }
+
   /// Returns true if the thread pool has no more work, otherwise it returns
   /// false.
   bool isEmpty() const noexcept {
@@ -269,8 +275,9 @@ class ThreadPool {
 
   /// Sets the worker flags to enable them to start running.
   void makeWorkersRunnable() noexcept {
-    for (auto& flag : Flags)
+    for (auto& flag : Flags) {
       flag = true;
+    }
   }
 
   /// Joins the threads.
@@ -326,14 +333,18 @@ class ThreadPool {
       Thread::threadId = workerId;
     }
 
-    auto& tasks = TaskQueues[workerId].tasks;
     while (runnable(workerId)) {
-      if (auto task = tasks.pop()) {
-        task->executor->execute();
-        continue;
-      }
-      steal(workerId, StealSelector());
+      processImpl(workerId);
     }
+  }
+
+  /// Process function for the controller thread.
+  void processImpl(std::size_t workerId) {
+    if (auto task = TaskQueues[workerId].tasks.pop()) {
+      task->executor->execute();
+      return;
+    }
+    steal(workerId, StealSelector());
   }
 
   /// Defines the implemenation of the stealing method when the stealing

@@ -53,7 +53,7 @@ static void BmThreadPoolProduceConsume(benchmark::State& state) {
         DoNotOptimize(x++);
       });
     }
-    while (!threadPool.isEmpty()) {}
+    threadPool.waitTillIdle();
 
     auto end      = high_resolution_clock::now();
     auto seconds  = duration_cast<duration<double>>(end - start).count();
@@ -112,7 +112,7 @@ static void BmThreadPoolProduceConsumeOwn(benchmark::State& state) {
     auto start = high_resolution_clock::now();
 
     // Wait for threads to finish:
-    while (!threadPool.isEmpty()) {}
+    threadPool.waitTillIdle();
 
     auto end      = high_resolution_clock::now();
     barrier.store(0);
@@ -157,7 +157,7 @@ static void BmThreadPoolPushOnSteal(benchmark::State& state) {
         });
       });
     }
-    while (!threadPool.isEmpty()) {}
+    threadPool.waitTillIdle();
 
     auto end      = high_resolution_clock::now();
     auto seconds  = duration_cast<duration<double>>(end - start).count();
@@ -196,7 +196,6 @@ static void BmThreadPoolEnqueueOnly(benchmark::State& state) {
     auto nseconds = duration_cast<nanoseconds>(end - start).count();
     state.SetIterationTime(seconds);
 
-
     state.counters.insert({
       {"Time/task (ns)", static_cast<double>(nseconds) / totalTasks},
       {"Tasks/sec (M)" , totalTasks / seconds / 1000000.0}          ,
@@ -225,7 +224,7 @@ static void BmThreadPoolEmptyTest(benchmark::State& state) {
     auto start = high_resolution_clock::now();
 
     threadPool.startThreads();
-    while (!threadPool.isEmpty()) { /* Spin ... */ }
+    threadPool.waitTillIdle();
 
     auto end      = high_resolution_clock::now();
     auto seconds  = duration_cast<duration<double>>(end - start).count();
@@ -273,11 +272,9 @@ static void BmThreadPoolEmptyTestOwnQueue(benchmark::State& state) {
     }
 
     auto start = high_resolution_clock::now();
-
-    // Wait for the workers to finish.
-    while (!threadPool.isEmpty()) { /* Spin ... */ }
-
+    threadPool.waitTillIdle();
     auto end      = high_resolution_clock::now();
+    
     auto seconds  = duration_cast<duration<double>>(end - start).count();
     auto nseconds = duration_cast<nanoseconds>(end - start).count();
     state.SetIterationTime(seconds);
