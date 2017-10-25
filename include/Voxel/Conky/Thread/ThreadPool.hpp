@@ -1,4 +1,4 @@
-//==--- Conky/Container/ThreadPool.hpp --------------------- -*- C++ -*- ---==//
+//==--- Conky/Thread/ThreadPool.hpp ------------------------ -*- C++ -*- ---==//
 //            
 //                                Voxel : Conky
 //
@@ -15,19 +15,18 @@
 //
 //==------------------------------------------------------------------------==//
 
-#pragma once
+#ifndef VOXX_CONKY_THREAD_THREAD_POOL_HPP
+#define VOXX_CONKY_THREAD_THREAD_POOL_HPP
 
-#include "Task.hpp"
 #include "ThreadPoolException.hpp"
-#include <Voxel/Conky/Concurrent/StaticStealableQueue.hpp>
-#include <Voxel/Conky/Thread/Thread.hpp>
+#include <Voxel/Conky/Container/StaticStealableQueue.hpp>
+#include <Voxel/Conky/Task/Task.hpp>
 #include <Voxel/Thread/Thread.hpp>
 #include <Voxel/SystemInfo/SystemInfo.hpp>
 #include <thread>
 #include <vector>
 
-namespace Voxx  {
-namespace Conky {
+namespace Voxx::Conky {
 
 /// The StealPolicy enum defines the stealing policy used by the thread pool.
 /// See the benchmarks for the difference in performance between the policies.
@@ -61,7 +60,16 @@ enum class StealPolicy : uint8_t {
   Topological      = 2
 };
 
-/// The ThreadPool class creates a thread pool with one controlling thread
+namespace Detail {
+
+/// Defines the size of the default task aligment relative to the destructive
+/// interface size.
+static constexpr std::size_t defaultTaskAlignment = 
+  System::destructiveInterferenceSize() << 1;
+
+} // namespace Detail
+
+/// The hreadPool class creates a thread pool with one controlling thread
 /// (which may be extended to be an interruptible worker thread) and (N - 1)
 /// worker threads, wher N is the total number of threads in the pool. There is
 /// a pool of tasks for each of the threads, including the controller thread.
@@ -79,9 +87,9 @@ enum class StealPolicy : uint8_t {
 ///                       be a multiple of the cache line size. The default is
 ///                       two cache lines as this is usually enough space for
 ///                       task arguments.
-template <std::size_t TasksPerQueue                                         ,
-          StealPolicy Policy        = StealPolicy::NearestNeighbour         ,
-          std::size_t TaskAlignment = System::destructiveInterfaceSize() * 2>
+template <std::size_t TasksPerQueue                                ,
+          StealPolicy Policy        = StealPolicy::NearestNeighbour,
+          std::size_t TaskAlignment = Detail::defaultTaskAlignment >
 class ThreadPool {
  public:
   //==--- Aliases ----------------------------------------------------------==//
@@ -89,14 +97,24 @@ class ThreadPool {
   /// Defines the type of the tasks.
   using TaskType = Task<TaskAlignment>;
 
+  //==--- Constants --------------------------------------------------------==//
+
+  /// Defines the size of the alignment for the tasks queues. The alignment
+  /// must be at least that of the tasks in the task queue, and large enough
+  /// to avoid false sharing. 
+  static constexpr std::size_t queueAlignment = 
+    std::max(TaskAlignment, System::destructiveInterferenceSize());
+
+  /// Defines the number of tasks in each of the queues.
+  static constexpr std::size_t tasksPerQueue  = TasksPerQueue;
+
  private:
   //==--- Structs ----------------------------------------------------------==//
   
   /// The StealOverloader struct is used to overload the stealing implementation
   /// based on the provided policy.
   /// \tparam PolicyKind  The kind of the stealing policy.
-  template <StealPolicy PolicyKind>
-  struct StealOverloader {};
+  template <StealPolicy PolicyKind> struct StealOverloader {};
 
   //==--- Aliases ----------------------------------------------------------==//
   
@@ -108,14 +126,6 @@ class ThreadPool {
   using NNeighbourSteal  = StealOverloader<StealPolicy::NearestNeighbour>;
   /// Defines the type of overloader for topological stealing. 
   using TopologicalSteal = StealOverloader<StealPolicy::Topological>;
-
-  //==--- Constants --------------------------------------------------------==//
-
-  /// Defines the size of the alignment for the tasks queues. The alignment
-  /// must be at least that of the tasks in the task queue, and large enough
-  /// to avoid false sharing. 
-  static constexpr std::size_t queueAlignment = 
-    std::max(TaskAlignment, System::destructiveInterfaceSize());
 
   /// The TaskQueue defines a correctly aligned queue of tasks for a thread.
   struct alignas(queueAlignment) TaskQueue {
@@ -158,21 +168,23 @@ class ThreadPool {
 
   //==--- Con-destruction --------------------------------------------------==//
   
+  /// Default constructor -- creates a thread pool with the number of threads
+  /// equal to the number of physical processors in the system.
+  ThreadPool() 
+  :   Flags(System::CpuInfo::cores())    ,
+      Threads(0)                         ,
+      TaskQueues(System::CpuInfo::cores()) {
+    Voxx::Thread::setAffinity(0);
+    createWorkers(System::CpuInfo::cores() - 1);
+  } 
+  
   /// Constructor -- creates \p numThreads - 1 threads and starts processing
   /// tasks on them.
   /// \param[in] numThreads  The number of threads in the pool, including the
   ///                        manager thread.
   ThreadPool(std::size_t numThreads)
   :   Flags(numThreads), Threads(0), TaskQueues(numThreads) {
-    Debug::catcher([numThreads] () {
-      if (numThreads > System::CpuInfo::cores())
-        throw ThreadPoolException(
-          ThreadPoolException::Type::Oversubscription);
-    });
-
-    // The first thread is always the controlling thread.
     Voxx::Thread::setAffinity(0);
-    makeWorkersRunnable();
     createWorkers(numThreads - 1);
   }
 
@@ -192,9 +204,9 @@ class ThreadPool {
   /// \tparam     TaskArgs      The types of the rguments for the task.
   template <typename TaskCallable, typename... TaskArgs>
   bool tryPush(TaskCallable&& callable, TaskArgs&&... args) {
-    auto& tasks = TaskQueues[Thread::threadId].tasks;
+    auto& tasks = TaskQueues[threadId].tasks;
     if (tasks.size() >= TasksPerQueue) {
-      // co_await pop();
+      // Add to continuations queue ...
       return false;
     }
 
@@ -216,11 +228,11 @@ class ThreadPool {
   /// been set to stop running and is still running, then it's set to stop, and
   /// waited on until it finishes, and a new thread is created in its place.
   void startThreads() noexcept {
-    if (Thread::threadId == 0) {
+    if (threadId == 0) {
       restartThreads();
     } else {
       auto restarter = std::thread([this] {
-        ::Voxx::Thread::setAffinity(0);
+        Thread::setAffinity(0);
         this->restartThreads();
       });
       restarter.join();
@@ -250,12 +262,18 @@ class ThreadPool {
     return true;
   }
 
+  /// Returns the affinity of the currently executing thread.
+  static std::size_t currentAffinity() { return threadId; }
+
  private:
   //==--- Members ----------------------------------------------------------==//
   
   FlagContainer   Flags;      //!< Flags to control the workers.
   ThreadContainer Threads;    //!< The threads for the pool.
   QueueContainer  TaskQueues; //!< The queues of tasks for each thread.
+  
+  /// Defines an identifier for each of the threads in the thread pool.
+  static thread_local std::size_t threadId;
   
   //==--- Methods ----------------------------------------------------------==//
 
@@ -269,8 +287,10 @@ class ThreadPool {
   /// Creates the worker threads.
   void createWorkers(std::size_t numThreads) {
     // TODO: Change this to get a proper thread index.
+    // We can't call reserve with thread, so just push noops which will return
+    // immediately.
     for (std::size_t i = 0; i < numThreads; ++i)
-      Threads.push_back(std::thread(&ThreadPool::process, this, i + 1));
+      Threads.push_back(std::thread([] {}));
   }
 
   /// Sets the worker flags to enable them to start running.
@@ -282,7 +302,7 @@ class ThreadPool {
 
   /// Joins the threads.
   void join() noexcept {
-    if (Thread::threadId == 0) {
+    if (threadId == 0) {
       for (auto& thread : Threads) {
         if (thread.joinable()) {
           thread.join();
@@ -296,7 +316,7 @@ class ThreadPool {
   /// be safe, and is not expected that the pool's threads should be started and
   /// stopped often.
   void restartThreads() {
-    if (Thread::threadId == 0) {
+    if (threadId == 0) {
       std::size_t i = 0;
       Flags[0]      = true;
       for (auto& thread : Threads) {
@@ -323,14 +343,13 @@ class ThreadPool {
   /// \param[in] id The index to assign to the thread, and which identifies
   ///               the worker.
   void process(std::size_t workerId) {
-    using namespace std::experimental;
     Voxx::Thread::setAffinity(workerId);
 
     // The global threadId, which can be used in client code to identify the
     // thread, is set to __id__ value so that when pushing to the thread pool
     // the correct worker can be accessed extremely quickly.
-    if (Thread::threadId != workerId) {
-      Thread::threadId = workerId;
+    if (threadId != workerId) {
+      threadId = workerId;
     }
 
     while (runnable(workerId)) {
@@ -373,4 +392,21 @@ class ThreadPool {
   }
 };
 
-}} // namespace Voxx::Conky
+//==--- Aliases ------------------------------------------------------------==//
+
+/// Defines the defualt number of tasks per thread.
+static constexpr std::size_t defaultTasksPerThread = 2048;
+
+/// Defines the type of the default thread pool.
+using DefaultThreadPool = ThreadPool<defaultTasksPerThread>;
+
+/// Initialization of the thread identifier for the pool's thread.
+/// \tparam TPQ   The number of tasks per queue.
+/// \tparam P     The steal policy.
+/// \tparam TA    The task alignemnt.
+template <std::size_t TPQ, StealPolicy P, std::size_t TA>
+thread_local std::size_t ThreadPool<TPQ, P, TA>::threadId = 0;
+
+} // namespace Voxx::Conky
+
+#endif // VOXX_CONKY_THREAD_THREAD_POOL_HPP

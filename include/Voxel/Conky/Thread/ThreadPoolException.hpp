@@ -1,4 +1,4 @@
-//==--- Conky/Container/ThreadPoolException.hpp ------------ -*- C++ -*- ---==//
+//==--- Conky/Thread/ThreadPoolException.hpp --------------- -*- C++ -*- ---==//
 //            
 //                                Voxel : Conky
 //
@@ -14,13 +14,13 @@
 //
 //==------------------------------------------------------------------------==//
 
-#pragma once
+#ifndef VOXX_CONKY_THREAD_THREAD_POOL_EXCEPTION_HPP
+#define VOXX_CONKY_THREAD_THREAD_POOL_EXCEPTION_HPP
 
 #include <exception>
 #include <string>
 
-namespace Voxx  {
-namespace Conky {
+namespace Voxx::Conky {
 
 /// The ThreadPoolException class overrides the standard exception class to
 /// define thread pool related exceptions.
@@ -52,4 +52,6 @@ class ThreadPoolException : public std::exception {
   const char* message() const noexcept;
 };
 
-}} // namespace Voxx::Conky
+} // namespace Voxx::Conky
+
+#endif // VOXX_CONKY_THREAD_THREAD_POOL_EXCEPTION_HPP

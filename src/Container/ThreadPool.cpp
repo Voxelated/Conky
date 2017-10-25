@@ -15,8 +15,7 @@
 
 #include <Voxel/Conky/Container/ThreadPoolException.hpp>
 
-namespace Voxx   {
-namespace Conky  {
+namespace Voxx::Conky {
 
 // Returns char string pointer with an appropriate message for the type of
 // the error.
@@ -27,4 +26,4 @@ const char* ThreadPoolException::message() const noexcept {
   }
 }
 
-}} // namespace Voxx::Conky
+} // namespace Voxx::Conky

@@ -1,6 +1,6 @@
 //==--- tests/ThreadPoolTests.hpp -------------------------- -*- C++ -*- ---==//
 //            
-//                                    Voxel
+//                                Voxel : Conky
 //
 //                        Copyright (c) 2017 Rob Clucas
 //  
@@ -13,21 +13,19 @@
 // 
 //==------------------------------------------------------------------------==//
 
-#include <Voxel/Conky/Container/ThreadPool.hpp>
-#include <Voxel/SystemInfo/SystemInfo.hpp>
-#include <Voxel/Thread/Thread.hpp>
+#include <Voxel/Conky/Thread/ThreadPool.hpp>
 #include <gtest/gtest.h>
 
-static constexpr std::size_t poolQueueSize = 2048;
-using ThreadPool = Voxx::Conky::ThreadPool<poolQueueSize>;
+using namespace Voxx::Conky;
 
 TEST(ThreadPool, CanPushGenericWorkOntoThreadPool) {
-  ThreadPool threadPool(Voxx::System::CpuInfo::cores());
+  DefaultThreadPool threadPool;
+  threadPool.startThreads();
 
   int intCount = 0, iterations = 100;
   for (int i = 0; i < iterations; ++i) {
-    threadPool.tryPush([&intCount] {
-      intCount += Voxx::Conky::Thread::threadId + 1;
+    threadPool.tryPush([&intCount, &threadPool] {
+      intCount += threadPool.currentAffinity() + 1;
     });
   }
 
@@ -40,11 +38,12 @@ TEST(ThreadPool, CanPushGenericWorkOntoThreadPool) {
   EXPECT_GT(intCount, iterations);
 }
 
-TEST(ThreadPool, CanHandleheavySubmission) {
-  ThreadPool threadPool(Voxx::System::CpuInfo::cores());
+TEST(ThreadPool, CanHandleHeavySubmission) {
+  DefaultThreadPool threadPool;
+  threadPool.startThreads();
 
   int result = 0;
-  for (std::size_t i = 0; i < (poolQueueSize << 6); ++i) {
+  for (std::size_t i = 0; i < (DefaultThreadPool::tasksPerQueue << 6); ++i) {
     threadPool.tryPush([&result, i] {
       result = i;
     });
@@ -53,11 +52,14 @@ TEST(ThreadPool, CanHandleheavySubmission) {
   while (!threadPool.isEmpty()) { /* Spin ... */ }
   threadPool.stopThreads();
 
-  EXPECT_GT(result, poolQueueSize - Voxx::System::CpuInfo::cores()); 
+  EXPECT_GT(result,
+            DefaultThreadPool::tasksPerQueue - Voxx::System::CpuInfo::cores()); 
 }
 
 TEST(ThreadPool, CanStartAndStopThreads) {
-  ThreadPool threadPool(Voxx::System::CpuInfo::cores());
+  DefaultThreadPool threadPool;
+  threadPool.startThreads();
+  //Voxx::System::CpuInfo::cores());
 
   EXPECT_EQ(threadPool.runningThreads(), Voxx::System::CpuInfo::cores());
   threadPool.stopThreads();

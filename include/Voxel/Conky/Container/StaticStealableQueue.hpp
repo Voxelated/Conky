@@ -1,4 +1,4 @@
-//==--- Conky/Concurrent/StaticStealableQueue.hpp ---------- -*- C++ -*- ---==//
+//==--- Conky/Container/StaticStealableQueue.hpp ----------- -*- C++ -*- ---==//
 //            
 //                                Voxel : Conky
 //
@@ -14,16 +14,16 @@
 //
 //==------------------------------------------------------------------------==//
 
-#pragma once
+#ifndef VOXX_CONKY_CONTAINER_STATIC_STEALABLE_QUEUE_HPP
+#define VOXX_CONKY_CONTAINER_STATIC_STEALABLE_QUEUE_HPP
 
 #include <Voxel/Math/Math.hpp>
 #include <Voxel/Thread/Thread.hpp>
 #include <array>
 #include <atomic>
-#include <experimental/optional>
+#include <optional>
 
-namespace Voxx  {
-namespace Conky {
+namespace Voxx::Conky {
 
 /// The StaticStealableQueue is a fixed-size, concurrent, lock-free stealable
 /// queue implementation. It is designed for a single thread to push and pop
@@ -95,7 +95,7 @@ class StaticStealableQueue {
   /// Defines the type of the objects in the queue.
   using ObjectType    = Object;
   /// Defines an optional typeto use when returning value types.
-  using OptionalType  = std::experimental::optional<ObjectType>;
+  using OptionalType  = std::optional<ObjectType>;
   /// Defines the type of container used to store the queue's objects.
   using ContainerType = std::array<ObjectType, MaxObjects>;
 
@@ -150,7 +150,6 @@ class StaticStealableQueue {
   /// Returns an optional type which is in a valid state if the queue is not
   /// empty.
   OptionalType pop() {
-    using namespace std::experimental;
     auto bottom = Bottom.load(std::memory_order_relaxed) - 1;
 
     // Sequentially consistant memory ordering is used here to ensure that the
@@ -163,10 +162,10 @@ class StaticStealableQueue {
     auto top = Top.load(std::memory_order_relaxed);
     if (top > bottom) {
       Bottom.store(top, std::memory_order_relaxed);
-      return nullopt;
+      return std::nullopt;
     }
 
-    auto object = make_optional(Objects[wrappedIndex(bottom)]);
+    auto object = std::make_optional(Objects[wrappedIndex(bottom)]);
     if (top != bottom)
       return object;
 
@@ -186,7 +185,7 @@ class StaticStealableQueue {
     // const of the branch is acceptable.
     Bottom.store(top + (exchanged ? 1 : 0), std::memory_order_relaxed);
 
-    return exchanged ? object : nullopt;
+    return exchanged ? object : std::nullopt;
   }
 
   /// Steals an object from the top of the queue. This returns an optional type
@@ -212,7 +211,6 @@ class StaticStealableQueue {
   /// 
   /// Returns a pointer to the top (oldest) element in the queue, or nullptr.
   OptionalType steal() {
-    using namespace std::experimental;
     // Top must be loaded before bottom, so we use acquire ordering since it
     // ensures that everyting below it stays below it.
     auto top = Top.load(std::memory_order_relaxed);
@@ -224,7 +222,7 @@ class StaticStealableQueue {
     auto bottom = Bottom.load(std::memory_order_relaxed);
 
     if (top >= bottom) {
-      return nullopt;
+      return std::nullopt;
     }
 
     // Here the object at top is fetched, and and update to Top is atempted,
@@ -241,12 +239,12 @@ class StaticStealableQueue {
     // 
     // This introduces overhead when there is contention to steal, and the steal
     // is unsuccessful, but in the succesful case there is no overhead.
-    auto object    = make_optional(Objects[wrappedIndex(top)]);
+    auto object    = std::make_optional(Objects[wrappedIndex(top)]);
     bool exchanged = Top.compare_exchange_strong(top                      ,
                                                  top + 1                  ,
                                                  std::memory_order_release);
 
-    return exchanged ? object : nullopt;
+    return exchanged ? object : std::nullopt;
   }
 
   /// Returns the number of elements in the queue. This __does not__ always
@@ -282,9 +280,9 @@ class StaticStealableQueue {
   //       so if bottom = 0 to start, then (0 - 1) = size_t_max, and the pop
   //       function tries to access an out of range element.
   
-  ContainerType Objects;       //!< Container of tasks.
-  AtomicType    Top      = 1;  //!< The index of the top element.
-  AtomicType    Bottom   = 1;  //!< The index of the bottom element. 
+  ContainerType Objects;     //!< Container of tasks.
+  AtomicType    Top    = 1;  //!< The index of the top element.
+  AtomicType    Bottom = 1;  //!< The index of the bottom element. 
                      
   //==--- Methods ----------------------------------------------------------==//
   
@@ -306,4 +304,6 @@ class StaticStealableQueue {
   }
 };
 
-}} // namespace Voxx::Conky
+} // namespace Voxx::Conky
+
+#endif // VOXX_CONKY_CONTAINER_STATIC_STEALABLE_QUEUE_HPP

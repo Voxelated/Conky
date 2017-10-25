@@ -16,6 +16,12 @@ voxx_target_link_libraries(ContainerTests
                            ${GTEST_BOTH_LIBRARIES}
                            ${Voxel_LIBRARIES})
 
+voxx_add_executable(TaskTests
+                    ${Conky_SOURCE_DIR}/tests/TaskTests.cpp)
+voxx_target_link_libraries(TaskTests
+                           ${GTEST_BOTH_LIBRARIES}
+                           ${Voxel_LIBRARIES})
+
 voxx_add_executable(ThreadPoolTests
                     ${Conky_SOURCE_DIR}/tests/ThreadPoolTests.cpp)
 voxx_target_link_libraries(ThreadPoolTests
@@ -52,5 +58,5 @@ if (benchmark_FOUND)
                       ${Conky_SOURCE_DIR}/tests/ThreadPoolBenchmarks.cpp)
   voxx_target_link_libraries(ThreadPoolBenchmarks 
                              ${Voxel_LIBRARIES}
-                             ${benchmark_LIBRARIES})
+                             ${benchmark_LIBRARIES} -lc++abi)
 endif(benchmark_FOUND)

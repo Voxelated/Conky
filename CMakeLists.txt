@@ -22,26 +22,36 @@ endif()
 
 #==--- Options --------------------------------------------------------------==#
 
-set(CMAKE_CXX_COMPILER /usr/bin/clang++)
+set(CMAKE_CXX_COMPILER clang++)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${Conky_SOURCE_DIR}/cmake)
 
+if("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
+
+else()
+
+endif()
 #==--- Packages -------------------------------------------------------------==#
 
 find_package(Voxel REQUIRED)
 
 #==--- Compiler Flags -------------------------------------------------------==#
 
+#set(CMAKE_CXX_STANDARD 17  )
+#set(CXX_STANDARD       TRUE)
+
 if(WIN32)
   set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2")
   set(CMAKE_CXX_FLAGS_DEBUG   "${CMAKE_CXX_FLAGS_DEBUG} /O2"  )
 else()
-  set(CMAKE_CXX_FLAGS_DEBUG   "${CMAKE_CXX_FLAGS_DEBUG} ${DEBUG_FLAGS}" )
+  set(COMMON_FLAGS "-std=c++17 -fcoroutines-ts"         )
+  set(DEBUG_FLAGS "${DEBUG_FLAGS} ${COMMON_FLAGS}"                     )
+  set(CMAKE_CXX_FLAGS_DEBUG   "${CMAKE_CXX_FLAGS_DEBUG} ${DEBUG_FLAGS}")
 endif()
 
 #==--- Set CXXFLAGS ---------------------------------------------------------==#
 
 if(CMAKE_BUILD_TYPE MATCHES Release)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_RELEASE} -g"
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_RELEASE} ${COMMON_FLAGS}"
       CACHE STRING "CXX FLAGS" FORCE)
 else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_DEBUG}" CACHE STRING "CXX FLAGS" FORCE)
